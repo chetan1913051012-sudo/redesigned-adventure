@@ -50,10 +50,11 @@ export default function StudentDashboard() {
 
     try {
       if (isSupabaseConfigured() && supabase) {
+        // Fetch media assigned to this student OR to "all" students
         const { data, error } = await supabase
           .from('media')
           .select('*')
-          .eq('student_id', currentStudent.studentId)
+          .or(`student_id.eq.${currentStudent.studentId},student_id.eq.all`)
           .order('created_at', { ascending: false })
 
         if (error) throw error
@@ -72,7 +73,8 @@ export default function StudentDashboard() {
         const storedMedia = localStorage.getItem('classX_media')
         if (storedMedia) {
           const allMedia: Media[] = JSON.parse(storedMedia)
-          setMedia(allMedia.filter(m => m.studentId === currentStudent.studentId))
+          // Show media assigned to this student OR to "all" students
+          setMedia(allMedia.filter(m => m.studentId === currentStudent.studentId || m.studentId === 'all'))
         }
       }
     } catch (error) {
@@ -213,8 +215,13 @@ export default function StudentDashboard() {
                 </div>
                 <div className="p-3">
                   <h3 className="font-medium text-gray-800 truncate">{item.title}</h3>
+                  {item.studentId === 'all' && (
+                    <span className="inline-block px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full mt-1">
+                      🌐 Class Photo
+                    </span>
+                  )}
                   {item.description && (
-                    <p className="text-sm text-gray-500 truncate">{item.description}</p>
+                    <p className="text-sm text-gray-500 truncate mt-1">{item.description}</p>
                   )}
                 </div>
               </div>

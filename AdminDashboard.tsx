@@ -55,8 +55,9 @@ export default function AdminDashboard() {
     title: '',
     description: '',
     studentId: '',
-    file: null as File | null
+    files: [] as File[]
   })
+  const [uploadProgress, setUploadProgress] = useState<{current: number, total: number} | null>(null)
 
   useEffect(() => {
     if (!isAdminLoggedIn) {
@@ -272,67 +273,85 @@ export default function AdminDashboard() {
   const handleMediaSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!mediaForm.file || !mediaForm.studentId) {
-      alert('Please select a file and student')
+    if (mediaForm.files.length === 0 || !mediaForm.studentId) {
+      alert('Please select at least one file and a student')
       return
     }
 
-    const selectedStudent = students.find(s => s.studentId === mediaForm.studentId)
-    const mediaType = mediaForm.file.type.startsWith('video/') ? 'video' : 'photo'
+    const isAllStudents = mediaForm.studentId === 'all'
+    const selectedStudent = isAllStudents ? null : students.find(s => s.studentId === mediaForm.studentId)
+    const studentName = isAllStudents ? 'All Students' : (selectedStudent?.name || '')
+
+    setUploadProgress({ current: 0, total: mediaForm.files.length })
 
     try {
-      let fileUrl = ''
+      for (let i = 0; i < mediaForm.files.length; i++) {
+        const file = mediaForm.files[i]
+        const mediaType = file.type.startsWith('video/') ? 'video' : 'photo'
+        const fileTitle = mediaForm.files.length === 1 
+          ? mediaForm.title 
+          : `${mediaForm.title} (${i + 1})`
 
-      if (isSupabaseConfigured() && supabase) {
-        // Upload file to Supabase Storage
-        const fileName = `${Date.now()}_${mediaForm.file.name}`
-        const { error: uploadError } = await supabase.storage
-          .from('media')
-          .upload(fileName, mediaForm.file)
+        setUploadProgress({ current: i + 1, total: mediaForm.files.length })
 
-        if (uploadError) throw uploadError
+        if (isSupabaseConfigured() && supabase) {
+          // Upload file to Supabase Storage
+          const fileName = `${Date.now()}_${file.name}`
+          const { error: uploadError } = await supabase.storage
+            .from('media')
+            .upload(fileName, file)
 
-        const { data: urlData } = supabase.storage.from('media').getPublicUrl(fileName)
-        fileUrl = urlData.publicUrl
+          if (uploadError) throw uploadError
 
-        // Save media record
-        const { error } = await supabase.from('media').insert({
-          title: mediaForm.title,
-          type: mediaType,
-          url: fileUrl,
-          description: mediaForm.description,
-          student_id: mediaForm.studentId,
-          student_name: selectedStudent?.name || ''
-        })
+          const { data: urlData } = supabase.storage.from('media').getPublicUrl(fileName)
+          const fileUrl = urlData.publicUrl
 
-        if (error) throw error
-      } else {
-        // localStorage fallback - convert file to base64
-        const reader = new FileReader()
-        reader.onload = () => {
-          const newMedia: Media = {
-            id: Date.now().toString(),
-            title: mediaForm.title,
+          // Save media record
+          const { error } = await supabase.from('media').insert({
+            title: fileTitle,
             type: mediaType,
-            url: reader.result as string,
+            url: fileUrl,
             description: mediaForm.description,
-            studentId: mediaForm.studentId,
-            studentName: selectedStudent?.name,
-            createdAt: new Date().toISOString()
-          }
-          const updated = [...media, newMedia]
-          setMedia(updated)
-          localStorage.setItem('classX_media', JSON.stringify(updated))
+            student_id: mediaForm.studentId,
+            student_name: studentName
+          })
+
+          if (error) throw error
+        } else {
+          // localStorage fallback - convert file to base64
+          await new Promise<void>((resolve) => {
+            const reader = new FileReader()
+            reader.onload = () => {
+              const newMedia: Media = {
+                id: `${Date.now()}_${i}`,
+                title: fileTitle,
+                type: mediaType,
+                url: reader.result as string,
+                description: mediaForm.description,
+                studentId: mediaForm.studentId,
+                studentName: studentName,
+                createdAt: new Date().toISOString()
+              }
+              const stored = localStorage.getItem('classX_media')
+              const existing = stored ? JSON.parse(stored) : []
+              const updated = [...existing, newMedia]
+              localStorage.setItem('classX_media', JSON.stringify(updated))
+              resolve()
+            }
+            reader.readAsDataURL(file)
+          })
         }
-        reader.readAsDataURL(mediaForm.file)
       }
 
-      setMediaForm({ title: '', description: '', studentId: '', file: null })
+      setMediaForm({ title: '', description: '', studentId: '', files: [] })
       setShowMediaForm(false)
+      setUploadProgress(null)
       loadMedia()
+      alert(`Successfully uploaded ${mediaForm.files.length} file(s)!`)
     } catch (error) {
       console.error('Error uploading media:', error)
       alert('Error uploading media. Please try again.')
+      setUploadProgress(null)
     }
   }
 
@@ -570,7 +589,11 @@ export default function AdminDashboard() {
                     </div>
                     <div className="p-3">
                       <h3 className="font-medium text-gray-800">{item.title}</h3>
-                      <p className="text-sm text-blue-600">📌 {item.studentName || item.studentId}</p>
+                      {item.studentId === 'all' ? (
+                        <p className="text-sm text-green-600 font-medium">🌐 All Students</p>
+                      ) : (
+                        <p className="text-sm text-blue-600">📌 {item.studentName || item.studentId}</p>
+                      )}
                       <button
                         onClick={() => handleDeleteMedia(item.id)}
                         className="mt-2 w-full px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-sm"
@@ -703,7 +726,7 @@ export default function AdminDashboard() {
       {showMediaForm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl p-6 w-full max-w-lg">
-            <h2 className="text-xl font-bold mb-4">Upload Media</h2>
+            <h2 className="text-xl font-bold mb-4">📤 Upload Media</h2>
             <form onSubmit={handleMediaSubmit} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
@@ -714,7 +737,11 @@ export default function AdminDashboard() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                   placeholder="Photo/Video title"
                   required
+                  disabled={uploadProgress !== null}
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  For multiple files, numbers will be added automatically (e.g., "Class Photo (1)", "Class Photo (2)")
+                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
@@ -724,50 +751,100 @@ export default function AdminDashboard() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                   placeholder="Optional description"
                   rows={2}
+                  disabled={uploadProgress !== null}
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Assign to Student *</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Assign to *</label>
                 <select
                   value={mediaForm.studentId}
                   onChange={(e) => setMediaForm({ ...mediaForm, studentId: e.target.value })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                   required
+                  disabled={uploadProgress !== null}
                 >
-                  <option value="">Select a student</option>
-                  {students.map((s) => (
-                    <option key={s.id} value={s.studentId}>
-                      {s.name} ({s.studentId})
-                    </option>
-                  ))}
+                  <option value="">Select recipient</option>
+                  <option value="all" className="font-bold text-green-600">🌐 All Students</option>
+                  <optgroup label="Individual Students">
+                    {students.map((s) => (
+                      <option key={s.id} value={s.studentId}>
+                        {s.name} ({s.studentId})
+                      </option>
+                    ))}
+                  </optgroup>
                 </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Choose "All Students" to share with everyone, or select a specific student.
+                </p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">File *</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Files * (Select Multiple)</label>
                 <input
                   type="file"
                   accept="image/*,video/*"
-                  onChange={(e) => setMediaForm({ ...mediaForm, file: e.target.files?.[0] || null })}
+                  multiple
+                  onChange={(e) => setMediaForm({ ...mediaForm, files: Array.from(e.target.files || []) })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
                   required
+                  disabled={uploadProgress !== null}
                 />
+                {mediaForm.files.length > 0 && (
+                  <p className="text-sm text-green-600 mt-2">
+                    ✅ {mediaForm.files.length} file(s) selected
+                  </p>
+                )}
+                {mediaForm.files.length > 1 && (
+                  <div className="mt-2 p-2 bg-gray-50 rounded-lg max-h-32 overflow-y-auto">
+                    <p className="text-xs text-gray-500 mb-1">Selected files:</p>
+                    {mediaForm.files.map((file, index) => (
+                      <p key={index} className="text-xs text-gray-600">
+                        {index + 1}. {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
+
+              {/* Upload Progress */}
+              {uploadProgress && (
+                <div className="p-4 bg-blue-50 rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-blue-700">
+                      Uploading... {uploadProgress.current} of {uploadProgress.total}
+                    </span>
+                    <span className="text-sm text-blue-600">
+                      {Math.round((uploadProgress.current / uploadProgress.total) * 100)}%
+                    </span>
+                  </div>
+                  <div className="w-full bg-blue-200 rounded-full h-2">
+                    <div 
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}
+                    ></div>
+                  </div>
+                </div>
+              )}
+
               <div className="flex gap-3 pt-4">
                 <button
                   type="button"
                   onClick={() => {
-                    setMediaForm({ title: '', description: '', studentId: '', file: null })
+                    setMediaForm({ title: '', description: '', studentId: '', files: [] })
                     setShowMediaForm(false)
                   }}
                   className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                  disabled={uploadProgress !== null}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+                  className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                  disabled={uploadProgress !== null}
                 >
-                  Upload
+                  {uploadProgress 
+                    ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...` 
+                    : `Upload ${mediaForm.files.length > 0 ? `(${mediaForm.files.length} files)` : ''}`}
                 </button>
               </div>
             </form>
