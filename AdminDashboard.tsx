@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
-import { supabase, isSupabaseConfigured } from './supabase-config'
+import { supabase, isSupabaseConfigured, loadCloudinarySettings, saveCloudinarySettings, getCloudinaryConfig } from './supabase-config'
 
 interface Student {
   id: string
@@ -28,26 +28,8 @@ interface Media {
   createdAt: string
 }
 
-// Cloudinary helpers
-const getCloudinaryConfig = () => {
-  const config = localStorage.getItem('cloudinary_config')
-  if (config) {
-    return JSON.parse(config)
-  }
-  return { cloudName: '', uploadPreset: '' }
-}
-
-const saveCloudinaryConfig = (cloudName: string, uploadPreset: string) => {
-  localStorage.setItem('cloudinary_config', JSON.stringify({ cloudName, uploadPreset }))
-}
-
-const isCloudinaryConfigured = () => {
-  const config = getCloudinaryConfig()
-  return config.cloudName && config.uploadPreset
-}
-
 const uploadToCloudinary = async (file: File): Promise<string> => {
-  const config = getCloudinaryConfig()
+  const config = await getCloudinaryConfig()
   
   if (!config.cloudName || !config.uploadPreset) {
     throw new Error('Cloudinary not configured')
@@ -84,6 +66,7 @@ export default function AdminDashboard() {
 
   // Cloudinary popup state
   const [showCloudinaryPopup, setShowCloudinaryPopup] = useState(false)
+  const [cloudinaryLoading, setCloudinaryLoading] = useState(true)
 
   // Student form state
   const [studentForm, setStudentForm] = useState({
@@ -113,22 +96,27 @@ export default function AdminDashboard() {
   })
   const [cloudinaryConnected, setCloudinaryConnected] = useState(false)
 
-  // Show Cloudinary popup on login if not configured
+  // Load Cloudinary settings from Supabase on mount
   useEffect(() => {
-    if (isAdminLoggedIn && !isCloudinaryConfigured()) {
-      setShowCloudinaryPopup(true)
+    const loadSettings = async () => {
+      setCloudinaryLoading(true)
+      const config = await loadCloudinarySettings()
+      if (config && config.cloudName && config.uploadPreset) {
+        setCloudinaryForm({
+          cloudName: config.cloudName,
+          uploadPreset: config.uploadPreset
+        })
+        setCloudinaryConnected(true)
+      } else {
+        // Show popup if not configured
+        if (isAdminLoggedIn) {
+          setShowCloudinaryPopup(true)
+        }
+      }
+      setCloudinaryLoading(false)
     }
+    loadSettings()
   }, [isAdminLoggedIn])
-
-  // Load Cloudinary config on mount
-  useEffect(() => {
-    const config = getCloudinaryConfig()
-    setCloudinaryForm({
-      cloudName: config.cloudName,
-      uploadPreset: config.uploadPreset
-    })
-    setCloudinaryConnected(isCloudinaryConfigured())
-  }, [])
 
   useEffect(() => {
     if (!isAdminLoggedIn) {
@@ -360,6 +348,13 @@ export default function AdminDashboard() {
       return
     }
 
+    // Check if Cloudinary is configured
+    if (!cloudinaryConnected) {
+      alert('⚠️ Please configure Cloudinary first in the Settings tab to enable file uploads.')
+      setActiveTab('settings')
+      return
+    }
+
     // Check file sizes
     const oversizedFiles = mediaForm.files.filter(f => f.size > MAX_FILE_SIZE)
     if (oversizedFiles.length > 0) {
@@ -388,42 +383,12 @@ export default function AdminDashboard() {
       try {
         let fileUrl = ''
 
-        // Try Cloudinary first (25GB FREE storage!)
-        if (isCloudinaryConfigured()) {
-          try {
-            fileUrl = await uploadToCloudinary(file)
-          } catch (cloudinaryError) {
-            console.error('Cloudinary upload failed:', cloudinaryError)
-            throw cloudinaryError
-          }
-        } 
-        // Fall back to Supabase Storage if configured
-        else if (isSupabaseConfigured() && supabase) {
-          const fileExt = file.name.split('.').pop()
-          const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`
-          
-          const { error: uploadError } = await supabase.storage
-            .from('media')
-            .upload(fileName, file, {
-              cacheControl: '3600',
-              upsert: false
-            })
-
-          if (uploadError) {
-            throw new Error(uploadError.message)
-          }
-
-          const { data: urlData } = supabase.storage.from('media').getPublicUrl(fileName)
-          fileUrl = urlData.publicUrl
-        } 
-        // Local storage fallback (base64)
-        else {
-          fileUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader()
-            reader.onload = () => resolve(reader.result as string)
-            reader.onerror = () => reject(reader.error)
-            reader.readAsDataURL(file)
-          })
+        // Upload to Cloudinary (25GB FREE storage!)
+        try {
+          fileUrl = await uploadToCloudinary(file)
+        } catch (cloudinaryError) {
+          console.error('Cloudinary upload failed:', cloudinaryError)
+          throw cloudinaryError
         }
 
         // Save media record to database - admin uploads are auto-approved
@@ -483,7 +448,7 @@ export default function AdminDashboard() {
     } else if (successCount > 0) {
       alert(`⚠️ Uploaded ${successCount} file(s), but ${failedFiles.length} failed:\n\n${failedFiles.join('\n')}`)
     } else {
-      alert(`❌ All uploads failed:\n\n${failedFiles.join('\n')}\n\nPossible reasons:\n• File too large (max 100MB)\n• Storage not set up correctly\n• Network issue`)
+      alert(`❌ All uploads failed:\n\n${failedFiles.join('\n')}\n\nPossible reasons:\n• File too large (max 100MB)\n• Cloudinary not set up correctly\n• Network issue`)
     }
   }
 
@@ -554,13 +519,40 @@ export default function AdminDashboard() {
     }
   }
 
-  // Save cloudinary settings from popup
-  const handleSaveCloudinary = (e: React.FormEvent) => {
+  // Save cloudinary settings to Supabase (permanent!)
+  const handleSaveCloudinary = async (e: React.FormEvent) => {
     e.preventDefault()
-    saveCloudinaryConfig(cloudinaryForm.cloudName, cloudinaryForm.uploadPreset)
-    setCloudinaryConnected(true)
-    setShowCloudinaryPopup(false)
-    alert('✅ Cloudinary settings saved! Files will now upload to cloud storage.')
+    
+    if (!cloudinaryForm.cloudName || !cloudinaryForm.uploadPreset) {
+      alert('Please enter both Cloud Name and Upload Preset')
+      return
+    }
+
+    const success = await saveCloudinarySettings(cloudinaryForm.cloudName, cloudinaryForm.uploadPreset)
+    if (success) {
+      setCloudinaryConnected(true)
+      setShowCloudinaryPopup(false)
+      alert('✅ Cloudinary settings saved permanently! Files will now upload to cloud storage (25GB FREE).')
+    } else {
+      alert('❌ Failed to save settings. Please try again.')
+    }
+  }
+
+  // Disconnect Cloudinary
+  const handleDisconnectCloudinary = async () => {
+    if (!confirm('Are you sure you want to disconnect Cloudinary?')) return
+
+    // Clear from Supabase
+    if (isSupabaseConfigured() && supabase) {
+      await supabase.from('settings').delete().eq('key', 'cloudinary')
+    }
+    
+    // Clear from localStorage
+    localStorage.removeItem('cloudinary_cloud_name')
+    localStorage.removeItem('cloudinary_upload_preset')
+    
+    setCloudinaryForm({ cloudName: '', uploadPreset: '' })
+    setCloudinaryConnected(false)
   }
 
   const filteredStudents = students.filter(s =>
@@ -603,7 +595,7 @@ export default function AdminDashboard() {
       {/* Mode Banner */}
       <div className={`text-center py-2 text-sm ${isSupabaseConfigured() ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
         {isSupabaseConfigured() 
-          ? `🟢 Supabase Connected ${isCloudinaryConfigured() ? '+ Cloudinary (25GB Storage)' : ''} - Real-time sync enabled` 
+          ? `🟢 Supabase Connected ${cloudinaryConnected ? '+ Cloudinary (25GB Storage)' : ''} - Real-time sync enabled` 
           : '🟡 Local Mode - Data stored in browser only. Configure Supabase + Cloudinary for real-time sync.'}
       </div>
 
@@ -659,7 +651,7 @@ export default function AdminDashboard() {
 
       {/* Content */}
       <main className="max-w-7xl mx-auto px-4 py-6">
-        {loading ? (
+        {loading || cloudinaryLoading ? (
           <div className="text-center py-12">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
             <p className="mt-4 text-gray-500">Loading...</p>
@@ -752,9 +744,9 @@ export default function AdminDashboard() {
               </div>
               <button
                 onClick={() => setShowMediaForm(true)}
-                disabled={students.length === 0}
+                disabled={students.length === 0 || !cloudinaryConnected}
                 className={`px-4 py-2 rounded-lg transition font-medium ${
-                  students.length === 0
+                  students.length === 0 || !cloudinaryConnected
                     ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                     : 'bg-purple-600 text-white hover:bg-purple-700'
                 }`}
@@ -769,6 +761,16 @@ export default function AdminDashboard() {
                 <p className="text-yellow-800 font-medium">⚠️ No students added yet!</p>
                 <p className="text-yellow-700 text-sm mt-1">
                   You need to add students first before uploading media.
+                </p>
+              </div>
+            )}
+
+            {/* Warning if Cloudinary not configured */}
+            {!cloudinaryConnected && (
+              <div className="mb-6 p-4 bg-orange-50 border border-orange-200 rounded-lg">
+                <p className="text-orange-800 font-medium">⚠️ Cloudinary not configured!</p>
+                <p className="text-orange-700 text-sm mt-1">
+                  Go to <button onClick={() => setActiveTab('settings')} className="underline font-medium">Settings</button> to configure cloud storage for file uploads.
                 </p>
               </div>
             )}
@@ -890,7 +892,7 @@ export default function AdminDashboard() {
           <div className="max-w-2xl">
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="text-xl font-bold mb-2">⚙️ Storage Settings</h2>
-              <p className="text-gray-500 mb-6">Configure Cloudinary for 25GB FREE file storage</p>
+              <p className="text-gray-500 mb-6">Configure Cloudinary for 25GB FREE file storage (saved permanently!)</p>
 
               {/* Current Status */}
               <div className={`p-4 rounded-lg mb-6 ${cloudinaryConnected ? 'bg-green-50 border border-green-200' : 'bg-yellow-50 border border-yellow-200'}`}>
@@ -901,7 +903,9 @@ export default function AdminDashboard() {
                       {cloudinaryConnected ? 'Cloudinary Connected!' : 'Cloudinary Not Connected'}
                     </p>
                     <p className={`text-sm ${cloudinaryConnected ? 'text-green-600' : 'text-yellow-600'}`}>
-                      {cloudinaryConnected ? '25GB free storage available for photos & videos' : 'Files are stored locally (lost when browser data is cleared)'}
+                      {cloudinaryConnected 
+                        ? '25GB free storage available. Settings saved permanently in database!' 
+                        : 'Configure Cloudinary to enable file uploads'}
                     </p>
                   </div>
                 </div>
@@ -920,12 +924,7 @@ export default function AdminDashboard() {
               </div>
 
               {/* Cloudinary Form */}
-              <form onSubmit={(e) => {
-                e.preventDefault()
-                saveCloudinaryConfig(cloudinaryForm.cloudName, cloudinaryForm.uploadPreset)
-                setCloudinaryConnected(true)
-                alert('✅ Cloudinary settings saved! Files will now upload to cloud storage.')
-              }} className="space-y-4">
+              <form onSubmit={handleSaveCloudinary} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Cloud Name *</label>
                   <input
@@ -952,20 +951,14 @@ export default function AdminDashboard() {
                   type="submit"
                   className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
                 >
-                  💾 Save Cloudinary Settings
+                  💾 Save Cloudinary Settings (Permanent)
                 </button>
               </form>
 
-              {/* Clear Settings */}
+              {/* Disconnect Button */}
               {cloudinaryConnected && (
                 <button
-                  onClick={() => {
-                    if (confirm('Are you sure you want to disconnect Cloudinary?')) {
-                      localStorage.removeItem('cloudinary_config')
-                      setCloudinaryForm({ cloudName: '', uploadPreset: '' })
-                      setCloudinaryConnected(false)
-                    }
-                  }}
+                  onClick={handleDisconnectCloudinary}
                   className="w-full mt-4 px-4 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200"
                 >
                   Disconnect Cloudinary
@@ -977,7 +970,7 @@ export default function AdminDashboard() {
       </main>
 
       {/* Cloudinary Setup Popup (shows on login if not configured) */}
-      {showCloudinaryPopup && (
+      {showCloudinaryPopup && !cloudinaryLoading && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl p-6 w-full max-w-lg">
             <h2 className="text-xl font-bold mb-2">☁️ Configure Cloud Storage</h2>
@@ -985,7 +978,7 @@ export default function AdminDashboard() {
             
             <div className="bg-yellow-50 border border-yellow-300 rounded-lg p-3 mb-4">
               <p className="text-sm text-yellow-800">
-                ⚠️ Without cloud storage, files will only work on this device and may be lost when browser data is cleared.
+                ⚠️ Cloud storage is required to upload files. Settings will be saved permanently.
               </p>
             </div>
 

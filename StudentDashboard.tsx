@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
-import { supabase, isSupabaseConfigured } from './supabase-config'
+import { supabase, isSupabaseConfigured, loadCloudinarySettings, getCloudinaryConfig } from './supabase-config'
 import MediaModal from './MediaModal'
 
 interface Media {
@@ -16,20 +16,6 @@ interface Media {
   createdAt: string
 }
 
-// Cloudinary config from localStorage
-const getCloudinaryConfig = () => {
-  const config = localStorage.getItem('cloudinary_config')
-  if (config) {
-    return JSON.parse(config)
-  }
-  return { cloudName: '', uploadPreset: '' }
-}
-
-const isCloudinaryConfigured = () => {
-  const config = getCloudinaryConfig()
-  return config.cloudName && config.uploadPreset
-}
-
 export default function StudentDashboard() {
   const { isStudentLoggedIn, currentStudent, logout } = useAuth()
   const navigate = useNavigate()
@@ -38,6 +24,9 @@ export default function StudentDashboard() {
   const [selectedMedia, setSelectedMedia] = useState<Media | null>(null)
   const [loading, setLoading] = useState(true)
   
+  // Cloudinary state
+  const [cloudinaryConfigured, setCloudinaryConfigured] = useState(false)
+  
   // Upload states
   const [showUploadModal, setShowUploadModal] = useState(false)
   const [uploadTitle, setUploadTitle] = useState('')
@@ -45,6 +34,15 @@ export default function StudentDashboard() {
   const [uploadFiles, setUploadFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState('')
+
+  // Load Cloudinary settings from Supabase on mount
+  useEffect(() => {
+    const checkCloudinary = async () => {
+      const config = await loadCloudinarySettings()
+      setCloudinaryConfigured(!!(config?.cloudName && config?.uploadPreset))
+    }
+    checkCloudinary()
+  }, [])
 
   useEffect(() => {
     if (!isStudentLoggedIn || !currentStudent) {
@@ -150,7 +148,7 @@ export default function StudentDashboard() {
   }
 
   const uploadToCloudinary = async (file: File): Promise<string> => {
-    const config = getCloudinaryConfig()
+    const config = await getCloudinaryConfig()
     
     if (!config.cloudName || !config.uploadPreset) {
       throw new Error('Cloudinary not configured. Please ask admin to configure it.')
@@ -177,6 +175,12 @@ export default function StudentDashboard() {
     e.preventDefault()
     if (!currentStudent || uploadFiles.length === 0) return
 
+    // Check if Cloudinary is configured
+    if (!cloudinaryConfigured) {
+      alert('⚠️ Cloud storage not configured. Please ask the admin to configure Cloudinary in the Settings tab.')
+      return
+    }
+
     setUploading(true)
     let successCount = 0
     let failCount = 0
@@ -188,13 +192,7 @@ export default function StudentDashboard() {
 
         try {
           // Upload to Cloudinary
-          let url: string
-          if (isCloudinaryConfigured()) {
-            url = await uploadToCloudinary(file)
-          } else {
-            // Fallback to blob URL (local only)
-            url = URL.createObjectURL(file)
-          }
+          const url = await uploadToCloudinary(file)
 
           const mediaType = file.type.startsWith('video/') ? 'video' : 'photo'
           const title = uploadFiles.length > 1 
@@ -299,7 +297,12 @@ export default function StudentDashboard() {
           <div className="flex gap-2">
             <button
               onClick={() => setShowUploadModal(true)}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
+              disabled={!cloudinaryConfigured}
+              className={`px-4 py-2 rounded-lg transition font-medium ${
+                cloudinaryConfigured
+                  ? 'bg-blue-600 text-white hover:bg-blue-700'
+                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              }`}
             >
               📤 Upload Media
             </button>
@@ -316,7 +319,7 @@ export default function StudentDashboard() {
       {/* Mode Banner */}
       <div className={`text-center py-2 text-sm ${isSupabaseConfigured() ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
         {isSupabaseConfigured() 
-          ? '🟢 Supabase Connected - Real-time sync enabled' 
+          ? `🟢 Connected ${cloudinaryConfigured ? '+ Cloud Storage Ready' : '- ⚠️ Cloud storage not configured (contact admin)'}` 
           : '🟡 Local Mode - Data stored in browser only'}
       </div>
 
@@ -341,6 +344,16 @@ export default function StudentDashboard() {
             <p className="text-gray-500">Videos</p>
           </div>
         </div>
+
+        {/* Warning if Cloudinary not configured */}
+        {!cloudinaryConfigured && (
+          <div className="mb-6 p-4 bg-orange-50 border border-orange-200 rounded-lg">
+            <p className="text-orange-800 font-medium">⚠️ Cloud storage not configured</p>
+            <p className="text-orange-700 text-sm mt-1">
+              Please ask your admin to configure Cloudinary in the Settings tab to enable file uploads.
+            </p>
+          </div>
+        )}
 
         {/* Filter */}
         <div className="flex gap-2 mb-6">
@@ -501,14 +514,6 @@ export default function StudentDashboard() {
                 ⚠️ Your uploads will be reviewed by admin before they become visible.
               </p>
             </div>
-
-            {!isCloudinaryConfigured() && (
-              <div className="bg-red-50 border border-red-300 rounded-lg p-3 mb-4">
-                <p className="text-sm text-red-800">
-                  ⚠️ Cloud storage not configured. Files will only work on this device.
-                </p>
-              </div>
-            )}
 
             <form onSubmit={handleUploadSubmit}>
               <div className="space-y-4">
