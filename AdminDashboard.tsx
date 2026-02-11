@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
 import { supabase, isSupabaseConfigured } from './supabase-config'
+import { uploadToCloudinary, isCloudinaryConfigured } from './cloudinary-config'
 
 interface Student {
   id: string
@@ -270,11 +271,20 @@ export default function AdminDashboard() {
     setShowStudentForm(false)
   }
 
+  const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB limit (Cloudinary supports larger files)
+
   const handleMediaSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
     if (mediaForm.files.length === 0 || !mediaForm.studentId) {
       alert('Please select at least one file and a student')
+      return
+    }
+
+    // Check file sizes
+    const oversizedFiles = mediaForm.files.filter(f => f.size > MAX_FILE_SIZE)
+    if (oversizedFiles.length > 0) {
+      alert(`❌ These files are too large (max 100MB each):\n\n${oversizedFiles.map(f => `• ${f.name} (${(f.size / 1024 / 1024).toFixed(1)}MB)`).join('\n')}\n\nPlease compress the videos or choose smaller files.`)
       return
     }
 
@@ -284,29 +294,61 @@ export default function AdminDashboard() {
 
     setUploadProgress({ current: 0, total: mediaForm.files.length })
 
-    try {
-      for (let i = 0; i < mediaForm.files.length; i++) {
-        const file = mediaForm.files[i]
-        const mediaType = file.type.startsWith('video/') ? 'video' : 'photo'
-        const fileTitle = mediaForm.files.length === 1 
-          ? mediaForm.title 
-          : `${mediaForm.title} (${i + 1})`
+    const failedFiles: string[] = []
+    let successCount = 0
 
-        setUploadProgress({ current: i + 1, total: mediaForm.files.length })
+    for (let i = 0; i < mediaForm.files.length; i++) {
+      const file = mediaForm.files[i]
+      const mediaType = file.type.startsWith('video/') ? 'video' : 'photo'
+      const fileTitle = mediaForm.files.length === 1 
+        ? mediaForm.title 
+        : `${mediaForm.title} (${i + 1})`
 
-        if (isSupabaseConfigured() && supabase) {
-          // Upload file to Supabase Storage
-          const fileName = `${Date.now()}_${file.name}`
+      setUploadProgress({ current: i + 1, total: mediaForm.files.length })
+
+      try {
+        let fileUrl = ''
+
+        // Try Cloudinary first (25GB FREE storage!)
+        if (isCloudinaryConfigured()) {
+          try {
+            fileUrl = await uploadToCloudinary(file)
+          } catch (cloudinaryError) {
+            console.error('Cloudinary upload failed:', cloudinaryError)
+            throw cloudinaryError
+          }
+        } 
+        // Fall back to Supabase Storage if configured
+        else if (isSupabaseConfigured() && supabase) {
+          const fileExt = file.name.split('.').pop()
+          const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`
+          
           const { error: uploadError } = await supabase.storage
             .from('media')
-            .upload(fileName, file)
+            .upload(fileName, file, {
+              cacheControl: '3600',
+              upsert: false
+            })
 
-          if (uploadError) throw uploadError
+          if (uploadError) {
+            throw new Error(uploadError.message)
+          }
 
           const { data: urlData } = supabase.storage.from('media').getPublicUrl(fileName)
-          const fileUrl = urlData.publicUrl
+          fileUrl = urlData.publicUrl
+        } 
+        // Local storage fallback (base64)
+        else {
+          fileUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result as string)
+            reader.onerror = () => reject(reader.error)
+            reader.readAsDataURL(file)
+          })
+        }
 
-          // Save media record
+        // Save media record to database
+        if (isSupabaseConfigured() && supabase) {
           const { error } = await supabase.from('media').insert({
             title: fileTitle,
             type: mediaType,
@@ -316,42 +358,49 @@ export default function AdminDashboard() {
             student_name: studentName
           })
 
-          if (error) throw error
+          if (error) {
+            console.error('Database error:', error)
+            failedFiles.push(`${file.name}: ${error.message}`)
+            continue
+          }
         } else {
-          // localStorage fallback - convert file to base64
-          await new Promise<void>((resolve) => {
-            const reader = new FileReader()
-            reader.onload = () => {
-              const newMedia: Media = {
-                id: `${Date.now()}_${i}`,
-                title: fileTitle,
-                type: mediaType,
-                url: reader.result as string,
-                description: mediaForm.description,
-                studentId: mediaForm.studentId,
-                studentName: studentName,
-                createdAt: new Date().toISOString()
-              }
-              const stored = localStorage.getItem('classX_media')
-              const existing = stored ? JSON.parse(stored) : []
-              const updated = [...existing, newMedia]
-              localStorage.setItem('classX_media', JSON.stringify(updated))
-              resolve()
-            }
-            reader.readAsDataURL(file)
-          })
+          // localStorage fallback
+          const newMedia: Media = {
+            id: `${Date.now()}_${i}`,
+            title: fileTitle,
+            type: mediaType,
+            url: fileUrl,
+            description: mediaForm.description,
+            studentId: mediaForm.studentId,
+            studentName: studentName,
+            createdAt: new Date().toISOString()
+          }
+          const stored = localStorage.getItem('classX_media')
+          const existing = stored ? JSON.parse(stored) : []
+          const updated = [...existing, newMedia]
+          localStorage.setItem('classX_media', JSON.stringify(updated))
         }
+        
+        successCount++
+      } catch (error: unknown) {
+        console.error('Error uploading file:', file.name, error)
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+        failedFiles.push(`${file.name}: ${errorMessage}`)
       }
+    }
 
-      setMediaForm({ title: '', description: '', studentId: '', files: [] })
-      setShowMediaForm(false)
-      setUploadProgress(null)
-      loadMedia()
-      alert(`Successfully uploaded ${mediaForm.files.length} file(s)!`)
-    } catch (error) {
-      console.error('Error uploading media:', error)
-      alert('Error uploading media. Please try again.')
-      setUploadProgress(null)
+    setMediaForm({ title: '', description: '', studentId: '', files: [] })
+    setShowMediaForm(false)
+    setUploadProgress(null)
+    loadMedia()
+
+    // Show result message
+    if (failedFiles.length === 0) {
+      alert(`✅ Successfully uploaded ${successCount} file(s)!`)
+    } else if (successCount > 0) {
+      alert(`⚠️ Uploaded ${successCount} file(s), but ${failedFiles.length} failed:\n\n${failedFiles.join('\n')}`)
+    } else {
+      alert(`❌ All uploads failed:\n\n${failedFiles.join('\n')}\n\nPossible reasons:\n• File too large (max 100MB)\n• Storage not set up correctly\n• Network issue`)
     }
   }
 
@@ -409,8 +458,8 @@ export default function AdminDashboard() {
       {/* Mode Banner */}
       <div className={`text-center py-2 text-sm ${isSupabaseConfigured() ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
         {isSupabaseConfigured() 
-          ? '🟢 Supabase Connected - Real-time sync enabled across all devices' 
-          : '🟡 Local Mode - Data stored in browser only. Configure Supabase for real-time sync.'}
+          ? `🟢 Supabase Connected ${isCloudinaryConfigured() ? '+ Cloudinary (25GB Storage)' : ''} - Real-time sync enabled` 
+          : '🟡 Local Mode - Data stored in browser only. Configure Supabase + Cloudinary for real-time sync.'}
       </div>
 
       {/* Tabs */}
@@ -788,19 +837,32 @@ export default function AdminDashboard() {
                   required
                   disabled={uploadProgress !== null}
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  Max file size: 100MB per file. {isCloudinaryConfigured() ? '☁️ Using Cloudinary (25GB free)' : 'For large videos, compress them first.'}
+                </p>
                 {mediaForm.files.length > 0 && (
-                  <p className="text-sm text-green-600 mt-2">
-                    ✅ {mediaForm.files.length} file(s) selected
-                  </p>
-                )}
-                {mediaForm.files.length > 1 && (
-                  <div className="mt-2 p-2 bg-gray-50 rounded-lg max-h-32 overflow-y-auto">
-                    <p className="text-xs text-gray-500 mb-1">Selected files:</p>
-                    {mediaForm.files.map((file, index) => (
-                      <p key={index} className="text-xs text-gray-600">
-                        {index + 1}. {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)
+                  <div className="mt-2 p-2 bg-gray-50 rounded-lg max-h-40 overflow-y-auto">
+                    <p className="text-sm text-green-600 font-medium mb-2">
+                      ✅ {mediaForm.files.length} file(s) selected
+                    </p>
+                    {mediaForm.files.map((file, index) => {
+                      const sizeMB = file.size / 1024 / 1024
+                      const isOversized = sizeMB > 100
+                      return (
+                        <div key={index} className={`text-xs py-1 ${isOversized ? 'text-red-600' : 'text-gray-600'}`}>
+                          {isOversized && '❌ '}{index + 1}. {file.name} ({sizeMB.toFixed(2)} MB)
+                          {isOversized && ' - TOO LARGE!'}
+                        </div>
+                      )
+                    })}
+                    {mediaForm.files.some(f => f.size > 100 * 1024 * 1024) && (
+                      <p className="text-xs text-red-600 font-medium mt-2">
+                        ⚠️ Some files exceed 100MB limit. They will fail to upload.
                       </p>
-                    ))}
+                    )}
+                    <p className="text-xs text-gray-500 mt-2 pt-2 border-t">
+                      Total: {(mediaForm.files.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)} MB
+                    </p>
                   </div>
                 )}
               </div>
