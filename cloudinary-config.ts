@@ -25,14 +25,20 @@ export const loadCloudinarySettings = async (): Promise<{ cloudName: string; upl
     return cachedConfig
   }
 
+  console.log('Loading Cloudinary settings...')
+  console.log('Supabase configured:', isSupabaseConfigured())
+
   // Try loading from Supabase first
   if (isSupabaseConfigured() && supabase) {
     try {
+      console.log('Fetching from Supabase settings table...')
       const { data, error } = await supabase
         .from('settings')
-        .select('cloud_name, upload_preset')
+        .select('*')
         .eq('key', 'cloudinary')
-        .single()
+        .maybeSingle()
+
+      console.log('Supabase response - data:', data, 'error:', error)
 
       if (!error && data && data.cloud_name && data.upload_preset) {
         cachedConfig = {
@@ -69,7 +75,13 @@ export const loadCloudinarySettings = async (): Promise<{ cloudName: string; upl
 }
 
 // Save Cloudinary settings to Supabase (permanent) and localStorage (backup)
-export const saveCloudinarySettings = async (cloudName: string, uploadPreset: string): Promise<boolean> => {
+export const saveCloudinarySettings = async (cloudName: string, uploadPreset: string): Promise<{ success: boolean; message: string }> => {
+  console.log('=== Saving Cloudinary Settings ===')
+  console.log('Cloud Name:', cloudName)
+  console.log('Upload Preset:', uploadPreset)
+  console.log('Supabase configured:', isSupabaseConfigured())
+  console.log('Supabase client exists:', !!supabase)
+
   // Update cache
   cachedConfig = { cloudName, uploadPreset }
 
@@ -80,11 +92,12 @@ export const saveCloudinarySettings = async (cloudName: string, uploadPreset: st
   // Save to Supabase for permanent storage across all devices
   if (isSupabaseConfigured() && supabase) {
     try {
-      // First delete any existing record
-      await supabase.from('settings').delete().eq('key', 'cloudinary')
+      console.log('Step 1: Deleting existing settings...')
+      const deleteResult = await supabase.from('settings').delete().eq('key', 'cloudinary')
+      console.log('Delete result:', deleteResult)
 
-      // Insert new record
-      const { error } = await supabase
+      console.log('Step 2: Inserting new settings...')
+      const { data, error } = await supabase
         .from('settings')
         .insert({
           key: 'cloudinary',
@@ -92,21 +105,37 @@ export const saveCloudinarySettings = async (cloudName: string, uploadPreset: st
           upload_preset: uploadPreset,
           updated_at: new Date().toISOString()
         })
+        .select()
+
+      console.log('Insert result - data:', data, 'error:', error)
 
       if (error) {
-        console.error('Error saving to Supabase:', error)
-        return false
+        console.error('❌ Supabase Error:', error.message)
+        return { 
+          success: false, 
+          message: `Database Error: ${error.message}. Settings saved locally only.` 
+        }
       }
 
-      console.log('✅ Cloudinary settings saved to Supabase permanently!')
-      return true
-    } catch (err) {
-      console.error('Error saving Cloudinary settings:', err)
-      return false
+      console.log('✅ Settings saved to Supabase successfully!')
+      return { 
+        success: true, 
+        message: '✅ Settings saved permanently to database!' 
+      }
+    } catch (err: any) {
+      console.error('❌ Exception:', err)
+      return { 
+        success: false, 
+        message: `Error: ${err.message}. Settings saved locally only.` 
+      }
+    }
+  } else {
+    console.log('⚠️ Supabase not configured, saved to localStorage only')
+    return { 
+      success: false, 
+      message: '⚠️ Supabase not connected. Settings saved locally only (will reset on other devices).' 
     }
   }
-
-  return true
 }
 
 // Check if Cloudinary is configured

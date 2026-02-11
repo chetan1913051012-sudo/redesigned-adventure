@@ -529,13 +529,18 @@ export default function AdminDashboard() {
       return
     }
 
-    const success = await saveCloudinarySettings(cloudinaryForm.cloudName, cloudinaryForm.uploadPreset)
-    if (success) {
+    const result = await saveCloudinarySettings(cloudinaryForm.cloudName, cloudinaryForm.uploadPreset)
+    
+    // Show the result message
+    alert(result.message)
+    
+    if (result.success) {
       setCloudinaryConnected(true)
       setShowCloudinaryPopup(false)
-      alert('✅ Cloudinary settings saved permanently! Files will now upload to cloud storage (25GB FREE).')
     } else {
-      alert('❌ Failed to save settings. Please try again.')
+      // Still set as connected for local use
+      setCloudinaryConnected(true)
+      setShowCloudinaryPopup(false)
     }
   }
 
