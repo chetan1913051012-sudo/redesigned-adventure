@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
-import { supabase, isSupabaseConfigured, loadCloudinarySettings, saveCloudinarySettings, getCloudinaryConfig } from './supabase-config'
+import { supabase, isSupabaseConfigured } from './supabase-config'
+import { loadCloudinarySettings, saveCloudinarySettings, getCloudinaryConfig } from './cloudinary-config'
 
 interface Student {
   id: string

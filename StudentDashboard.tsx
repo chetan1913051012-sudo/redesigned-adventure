@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
-import { supabase, isSupabaseConfigured, loadCloudinarySettings, getCloudinaryConfig } from './supabase-config'
+import { supabase, isSupabaseConfigured } from './supabase-config'
+import { loadCloudinarySettings, getCloudinaryConfig } from './cloudinary-config'
 import MediaModal from './MediaModal'
 
 interface Media {
