@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
 import { supabase, isSupabaseConfigured } from './supabase-config'
-import { uploadToCloudinary, isCloudinaryConfigured, saveCloudinaryConfig, getCloudinaryConfig } from './cloudinary-config'
 
 interface Student {
   id: string
@@ -24,13 +23,57 @@ interface Media {
   description: string
   studentId: string
   studentName?: string
+  status: 'pending' | 'approved' | 'rejected'
+  uploadedBy: string
   createdAt: string
+}
+
+// Cloudinary helpers
+const getCloudinaryConfig = () => {
+  const config = localStorage.getItem('cloudinary_config')
+  if (config) {
+    return JSON.parse(config)
+  }
+  return { cloudName: '', uploadPreset: '' }
+}
+
+const saveCloudinaryConfig = (cloudName: string, uploadPreset: string) => {
+  localStorage.setItem('cloudinary_config', JSON.stringify({ cloudName, uploadPreset }))
+}
+
+const isCloudinaryConfigured = () => {
+  const config = getCloudinaryConfig()
+  return config.cloudName && config.uploadPreset
+}
+
+const uploadToCloudinary = async (file: File): Promise<string> => {
+  const config = getCloudinaryConfig()
+  
+  if (!config.cloudName || !config.uploadPreset) {
+    throw new Error('Cloudinary not configured')
+  }
+
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('upload_preset', config.uploadPreset)
+
+  const response = await fetch(
+    `https://api.cloudinary.com/v1_1/${config.cloudName}/auto/upload`,
+    { method: 'POST', body: formData }
+  )
+
+  if (!response.ok) {
+    throw new Error('Cloudinary upload failed')
+  }
+
+  const data = await response.json()
+  return data.secure_url
 }
 
 export default function AdminDashboard() {
   const { isAdminLoggedIn, logout } = useAuth()
   const navigate = useNavigate()
-  const [activeTab, setActiveTab] = useState<'students' | 'media' | 'settings'>('students')
+  const [activeTab, setActiveTab] = useState<'students' | 'media' | 'approvals' | 'settings'>('students')
   const [students, setStudents] = useState<Student[]>([])
   const [media, setMedia] = useState<Media[]>([])
   const [showStudentForm, setShowStudentForm] = useState(false)
@@ -38,6 +81,9 @@ export default function AdminDashboard() {
   const [editingStudent, setEditingStudent] = useState<Student | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [loading, setLoading] = useState(true)
+
+  // Cloudinary popup state
+  const [showCloudinaryPopup, setShowCloudinaryPopup] = useState(false)
 
   // Student form state
   const [studentForm, setStudentForm] = useState({
@@ -66,6 +112,13 @@ export default function AdminDashboard() {
     uploadPreset: ''
   })
   const [cloudinaryConnected, setCloudinaryConnected] = useState(false)
+
+  // Show Cloudinary popup on login if not configured
+  useEffect(() => {
+    if (isAdminLoggedIn && !isCloudinaryConfigured()) {
+      setShowCloudinaryPopup(true)
+    }
+  }, [isAdminLoggedIn])
 
   // Load Cloudinary config on mount
   useEffect(() => {
@@ -161,11 +214,20 @@ export default function AdminDashboard() {
           description: m.description || '',
           studentId: m.student_id,
           studentName: m.student_name,
+          status: m.status || 'approved',
+          uploadedBy: m.uploaded_by || 'admin',
           createdAt: m.created_at
         })) || [])
       } else {
         const stored = localStorage.getItem('classX_media')
-        if (stored) setMedia(JSON.parse(stored))
+        if (stored) {
+          const parsed = JSON.parse(stored)
+          setMedia(parsed.map((m: Media) => ({
+            ...m,
+            status: m.status || 'approved',
+            uploadedBy: m.uploadedBy || 'admin'
+          })))
+        }
       }
     } catch (error) {
       console.error('Error loading media:', error)
@@ -288,7 +350,7 @@ export default function AdminDashboard() {
     setShowStudentForm(false)
   }
 
-  const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB limit (Cloudinary supports larger files)
+  const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB limit
 
   const handleMediaSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -364,7 +426,7 @@ export default function AdminDashboard() {
           })
         }
 
-        // Save media record to database
+        // Save media record to database - admin uploads are auto-approved
         if (isSupabaseConfigured() && supabase) {
           const { error } = await supabase.from('media').insert({
             title: fileTitle,
@@ -372,7 +434,9 @@ export default function AdminDashboard() {
             url: fileUrl,
             description: mediaForm.description,
             student_id: mediaForm.studentId,
-            student_name: studentName
+            student_name: studentName,
+            status: 'approved', // Admin uploads are auto-approved
+            uploaded_by: 'admin'
           })
 
           if (error) {
@@ -390,6 +454,8 @@ export default function AdminDashboard() {
             description: mediaForm.description,
             studentId: mediaForm.studentId,
             studentName: studentName,
+            status: 'approved',
+            uploadedBy: 'admin',
             createdAt: new Date().toISOString()
           }
           const stored = localStorage.getItem('classX_media')
@@ -439,11 +505,73 @@ export default function AdminDashboard() {
     }
   }
 
+  // Approve/Reject media
+  const handleApproveMedia = async (id: string) => {
+    try {
+      if (isSupabaseConfigured() && supabase) {
+        const { error } = await supabase
+          .from('media')
+          .update({ status: 'approved' })
+          .eq('id', id)
+        if (error) throw error
+      } else {
+        const updated = media.map(m => 
+          m.id === id ? { ...m, status: 'approved' as const } : m
+        )
+        setMedia(updated)
+        localStorage.setItem('classX_media', JSON.stringify(updated))
+      }
+      loadMedia()
+      alert('✅ Media approved!')
+    } catch (error) {
+      console.error('Error approving media:', error)
+      alert('Failed to approve media')
+    }
+  }
+
+  const handleRejectMedia = async (id: string) => {
+    if (!confirm('Are you sure you want to reject this upload?')) return
+
+    try {
+      if (isSupabaseConfigured() && supabase) {
+        const { error } = await supabase
+          .from('media')
+          .update({ status: 'rejected' })
+          .eq('id', id)
+        if (error) throw error
+      } else {
+        const updated = media.map(m => 
+          m.id === id ? { ...m, status: 'rejected' as const } : m
+        )
+        setMedia(updated)
+        localStorage.setItem('classX_media', JSON.stringify(updated))
+      }
+      loadMedia()
+      alert('❌ Media rejected!')
+    } catch (error) {
+      console.error('Error rejecting media:', error)
+      alert('Failed to reject media')
+    }
+  }
+
+  // Save cloudinary settings from popup
+  const handleSaveCloudinary = (e: React.FormEvent) => {
+    e.preventDefault()
+    saveCloudinaryConfig(cloudinaryForm.cloudName, cloudinaryForm.uploadPreset)
+    setCloudinaryConnected(true)
+    setShowCloudinaryPopup(false)
+    alert('✅ Cloudinary settings saved! Files will now upload to cloud storage.')
+  }
+
   const filteredStudents = students.filter(s =>
     s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     s.studentId.toLowerCase().includes(searchTerm.toLowerCase()) ||
     s.rollNo.toLowerCase().includes(searchTerm.toLowerCase())
   )
+
+  // Get pending uploads
+  const pendingMedia = media.filter(m => m.status === 'pending')
+  const approvedMedia = media.filter(m => m.status === 'approved')
 
   if (!isAdminLoggedIn) return null
 
@@ -481,10 +609,10 @@ export default function AdminDashboard() {
 
       {/* Tabs */}
       <div className="max-w-7xl mx-auto px-4 pt-6">
-        <div className="flex gap-2 border-b border-gray-200">
+        <div className="flex gap-2 border-b border-gray-200 overflow-x-auto">
           <button
             onClick={() => setActiveTab('students')}
-            className={`px-6 py-3 font-medium transition ${
+            className={`px-6 py-3 font-medium transition whitespace-nowrap ${
               activeTab === 'students'
                 ? 'text-blue-600 border-b-2 border-blue-600'
                 : 'text-gray-500 hover:text-gray-700'
@@ -494,17 +622,31 @@ export default function AdminDashboard() {
           </button>
           <button
             onClick={() => setActiveTab('media')}
-            className={`px-6 py-3 font-medium transition ${
+            className={`px-6 py-3 font-medium transition whitespace-nowrap ${
               activeTab === 'media'
                 ? 'text-blue-600 border-b-2 border-blue-600'
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            📷 Media ({media.length})
+            📷 Media ({approvedMedia.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('approvals')}
+            className={`px-6 py-3 font-medium transition whitespace-nowrap ${
+              activeTab === 'approvals'
+                ? 'text-blue-600 border-b-2 border-blue-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            ⏳ Approvals {pendingMedia.length > 0 && (
+              <span className="ml-1 px-2 py-0.5 bg-red-500 text-white text-xs rounded-full">
+                {pendingMedia.length}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('settings')}
-            className={`px-6 py-3 font-medium transition ${
+            className={`px-6 py-3 font-medium transition whitespace-nowrap ${
               activeTab === 'settings'
                 ? 'text-blue-600 border-b-2 border-blue-600'
                 : 'text-gray-500 hover:text-gray-700'
@@ -605,7 +747,7 @@ export default function AdminDashboard() {
             {/* Media Header */}
             <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center mb-6">
               <div>
-                <h2 className="text-lg font-semibold text-gray-800">📷 Media Gallery</h2>
+                <h2 className="text-lg font-semibold text-gray-800">📷 Approved Media</h2>
                 <p className="text-sm text-gray-500">Upload photos and videos for students</p>
               </div>
               <button
@@ -626,30 +768,20 @@ export default function AdminDashboard() {
               <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
                 <p className="text-yellow-800 font-medium">⚠️ No students added yet!</p>
                 <p className="text-yellow-700 text-sm mt-1">
-                  You need to add students first before uploading media. Go to the{' '}
-                  <button
-                    onClick={() => setActiveTab('students')}
-                    className="text-blue-600 underline hover:text-blue-800"
-                  >
-                    Students tab
-                  </button>{' '}
-                  and add at least one student.
+                  You need to add students first before uploading media.
                 </p>
               </div>
             )}
 
             {/* Media Grid */}
-            {media.length === 0 ? (
+            {approvedMedia.length === 0 ? (
               <div className="text-center py-12 bg-white rounded-xl shadow-sm">
                 <div className="text-6xl mb-4">📷</div>
-                <p className="text-gray-500 text-lg">No media uploaded yet.</p>
-                {students.length > 0 && (
-                  <p className="text-gray-400 text-sm mt-2">Click "Upload Media" to add photos or videos.</p>
-                )}
+                <p className="text-gray-500 text-lg">No approved media yet.</p>
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {media.map((item) => (
+                {approvedMedia.map((item) => (
                   <div key={item.id} className="bg-white rounded-xl overflow-hidden shadow-sm">
                     <div className="aspect-video relative overflow-hidden bg-gray-100">
                       {item.type === 'photo' ? (
@@ -670,12 +802,83 @@ export default function AdminDashboard() {
                       ) : (
                         <p className="text-sm text-blue-600">📌 {item.studentName || item.studentId}</p>
                       )}
+                      <p className="text-xs text-gray-400 mt-1">
+                        By: {item.uploadedBy === 'admin' ? '👨‍💼 Admin' : `👤 ${item.uploadedBy}`}
+                      </p>
                       <button
                         onClick={() => handleDeleteMedia(item.id)}
                         className="mt-2 w-full px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-sm"
                       >
                         Delete
                       </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : activeTab === 'approvals' ? (
+          <div>
+            <div className="mb-6">
+              <h2 className="text-lg font-semibold text-gray-800">⏳ Pending Approvals</h2>
+              <p className="text-sm text-gray-500">Review and approve student uploads</p>
+            </div>
+
+            {pendingMedia.length === 0 ? (
+              <div className="text-center py-12 bg-white rounded-xl shadow-sm">
+                <div className="text-6xl mb-4">✅</div>
+                <p className="text-gray-500 text-lg">No pending uploads!</p>
+                <p className="text-gray-400 text-sm mt-1">All student uploads have been reviewed.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+                {pendingMedia.map((item) => (
+                  <div key={item.id} className="bg-white rounded-xl overflow-hidden shadow-sm border-2 border-yellow-300">
+                    <div className="aspect-video relative overflow-hidden bg-gray-100">
+                      {item.type === 'photo' ? (
+                        <img src={item.url} alt={item.title} className="w-full h-full object-cover" />
+                      ) : (
+                        <video src={item.url} controls className="w-full h-full object-cover" />
+                      )}
+                      <span className="absolute top-2 left-2 px-2 py-1 rounded-full text-xs font-medium bg-yellow-400 text-yellow-900">
+                        ⏳ Pending
+                      </span>
+                      <span className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium ${
+                        item.type === 'photo' ? 'bg-green-100 text-green-700' : 'bg-purple-100 text-purple-700'
+                      }`}>
+                        {item.type}
+                      </span>
+                    </div>
+                    <div className="p-4">
+                      <h3 className="font-medium text-gray-800 text-lg">{item.title}</h3>
+                      {item.description && (
+                        <p className="text-sm text-gray-500 mt-1">{item.description}</p>
+                      )}
+                      <div className="mt-2 p-2 bg-gray-50 rounded">
+                        <p className="text-xs text-gray-600">
+                          <strong>Uploaded by:</strong> {item.uploadedBy}
+                        </p>
+                        <p className="text-xs text-gray-600">
+                          <strong>Assigned to:</strong> {item.studentId === 'all' ? 'All Students' : item.studentName || item.studentId}
+                        </p>
+                        <p className="text-xs text-gray-400 mt-1">
+                          {new Date(item.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="flex gap-2 mt-4">
+                        <button
+                          onClick={() => handleApproveMedia(item.id)}
+                          className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium"
+                        >
+                          ✅ Approve
+                        </button>
+                        <button
+                          onClick={() => handleRejectMedia(item.id)}
+                          className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
+                        >
+                          ❌ Reject
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -733,7 +936,6 @@ export default function AdminDashboard() {
                     placeholder="e.g., dxyz12345"
                     required
                   />
-                  <p className="text-xs text-gray-500 mt-1">Found on your Cloudinary Dashboard</p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Upload Preset *</label>
@@ -745,7 +947,6 @@ export default function AdminDashboard() {
                     placeholder="e.g., class_x_media"
                     required
                   />
-                  <p className="text-xs text-gray-500 mt-1">Create in Settings → Upload → Upload Presets (must be Unsigned)</p>
                 </div>
                 <button
                   type="submit"
@@ -775,6 +976,71 @@ export default function AdminDashboard() {
         )}
       </main>
 
+      {/* Cloudinary Setup Popup (shows on login if not configured) */}
+      {showCloudinaryPopup && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-lg">
+            <h2 className="text-xl font-bold mb-2">☁️ Configure Cloud Storage</h2>
+            <p className="text-gray-500 mb-4">Set up Cloudinary for 25GB FREE file storage</p>
+            
+            <div className="bg-yellow-50 border border-yellow-300 rounded-lg p-3 mb-4">
+              <p className="text-sm text-yellow-800">
+                ⚠️ Without cloud storage, files will only work on this device and may be lost when browser data is cleared.
+              </p>
+            </div>
+
+            <div className="mb-4 p-3 bg-blue-50 rounded-lg">
+              <h3 className="font-semibold text-blue-800 mb-2 text-sm">Quick Setup:</h3>
+              <ol className="text-xs text-blue-700 space-y-1">
+                <li>1. Go to <a href="https://cloudinary.com/users/register_free" target="_blank" rel="noopener noreferrer" className="underline font-medium">cloudinary.com</a> → Sign up FREE</li>
+                <li>2. Copy <strong>Cloud Name</strong> from Dashboard</li>
+                <li>3. Settings → Upload → Add preset (Unsigned mode)</li>
+              </ol>
+            </div>
+
+            <form onSubmit={handleSaveCloudinary} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cloud Name *</label>
+                <input
+                  type="text"
+                  value={cloudinaryForm.cloudName}
+                  onChange={(e) => setCloudinaryForm({ ...cloudinaryForm, cloudName: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  placeholder="e.g., dxyz12345"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Upload Preset *</label>
+                <input
+                  type="text"
+                  value={cloudinaryForm.uploadPreset}
+                  onChange={(e) => setCloudinaryForm({ ...cloudinaryForm, uploadPreset: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  placeholder="e.g., class_x_media"
+                  required
+                />
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowCloudinaryPopup(false)}
+                  className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                >
+                  Skip for Now
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Save & Continue
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Student Form Modal */}
       {showStudentForm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -788,7 +1054,7 @@ export default function AdminDashboard() {
                     type="text"
                     value={studentForm.studentId}
                     onChange={(e) => setStudentForm({ ...studentForm, studentId: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     placeholder="e.g., STU001"
                     required
                   />
@@ -799,7 +1065,7 @@ export default function AdminDashboard() {
                     type="text"
                     value={studentForm.password}
                     onChange={(e) => setStudentForm({ ...studentForm, password: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     placeholder="Set password"
                     required
                   />
@@ -811,7 +1077,7 @@ export default function AdminDashboard() {
                   type="text"
                   value={studentForm.name}
                   onChange={(e) => setStudentForm({ ...studentForm, name: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   placeholder="Student's full name"
                   required
                 />
@@ -823,7 +1089,7 @@ export default function AdminDashboard() {
                     type="text"
                     value={studentForm.rollNo}
                     onChange={(e) => setStudentForm({ ...studentForm, rollNo: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     placeholder="01"
                   />
                 </div>
@@ -833,7 +1099,7 @@ export default function AdminDashboard() {
                     type="text"
                     value={studentForm.class}
                     onChange={(e) => setStudentForm({ ...studentForm, class: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     placeholder="X"
                   />
                 </div>
@@ -843,7 +1109,7 @@ export default function AdminDashboard() {
                     type="text"
                     value={studentForm.section}
                     onChange={(e) => setStudentForm({ ...studentForm, section: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     placeholder="A"
                   />
                 </div>
@@ -854,7 +1120,7 @@ export default function AdminDashboard() {
                   type="email"
                   value={studentForm.email}
                   onChange={(e) => setStudentForm({ ...studentForm, email: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   placeholder="student@email.com"
                 />
               </div>
@@ -864,7 +1130,7 @@ export default function AdminDashboard() {
                   type="tel"
                   value={studentForm.phone}
                   onChange={(e) => setStudentForm({ ...studentForm, phone: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   placeholder="+91 9876543210"
                 />
               </div>
@@ -900,21 +1166,18 @@ export default function AdminDashboard() {
                   type="text"
                   value={mediaForm.title}
                   onChange={(e) => setMediaForm({ ...mediaForm, title: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   placeholder="Photo/Video title"
                   required
                   disabled={uploadProgress !== null}
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  For multiple files, numbers will be added automatically (e.g., "Class Photo (1)", "Class Photo (2)")
-                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
                 <textarea
                   value={mediaForm.description}
                   onChange={(e) => setMediaForm({ ...mediaForm, description: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   placeholder="Optional description"
                   rows={2}
                   disabled={uploadProgress !== null}
@@ -925,7 +1188,7 @@ export default function AdminDashboard() {
                 <select
                   value={mediaForm.studentId}
                   onChange={(e) => setMediaForm({ ...mediaForm, studentId: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   required
                   disabled={uploadProgress !== null}
                 >
@@ -939,9 +1202,6 @@ export default function AdminDashboard() {
                     ))}
                   </optgroup>
                 </select>
-                <p className="text-xs text-gray-500 mt-1">
-                  Choose "All Students" to share with everyone, or select a specific student.
-                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Files * (Select Multiple)</label>
@@ -950,54 +1210,27 @@ export default function AdminDashboard() {
                   accept="image/*,video/*"
                   multiple
                   onChange={(e) => setMediaForm({ ...mediaForm, files: Array.from(e.target.files || []) })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   required
                   disabled={uploadProgress !== null}
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  Max file size: 100MB per file. {isCloudinaryConfigured() ? '☁️ Using Cloudinary (25GB free)' : 'For large videos, compress them first.'}
-                </p>
                 {mediaForm.files.length > 0 && (
-                  <div className="mt-2 p-2 bg-gray-50 rounded-lg max-h-40 overflow-y-auto">
-                    <p className="text-sm text-green-600 font-medium mb-2">
-                      ✅ {mediaForm.files.length} file(s) selected
-                    </p>
-                    {mediaForm.files.map((file, index) => {
-                      const sizeMB = file.size / 1024 / 1024
-                      const isOversized = sizeMB > 100
-                      return (
-                        <div key={index} className={`text-xs py-1 ${isOversized ? 'text-red-600' : 'text-gray-600'}`}>
-                          {isOversized && '❌ '}{index + 1}. {file.name} ({sizeMB.toFixed(2)} MB)
-                          {isOversized && ' - TOO LARGE!'}
-                        </div>
-                      )
-                    })}
-                    {mediaForm.files.some(f => f.size > 100 * 1024 * 1024) && (
-                      <p className="text-xs text-red-600 font-medium mt-2">
-                        ⚠️ Some files exceed 100MB limit. They will fail to upload.
-                      </p>
-                    )}
-                    <p className="text-xs text-gray-500 mt-2 pt-2 border-t">
-                      Total: {(mediaForm.files.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)} MB
-                    </p>
-                  </div>
+                  <p className="text-sm text-green-600 mt-1">
+                    ✅ {mediaForm.files.length} file(s) selected
+                  </p>
                 )}
               </div>
 
-              {/* Upload Progress */}
               {uploadProgress && (
                 <div className="p-4 bg-blue-50 rounded-lg">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-medium text-blue-700">
                       Uploading... {uploadProgress.current} of {uploadProgress.total}
                     </span>
-                    <span className="text-sm text-blue-600">
-                      {Math.round((uploadProgress.current / uploadProgress.total) * 100)}%
-                    </span>
                   </div>
                   <div className="w-full bg-blue-200 rounded-full h-2">
                     <div 
-                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                      className="bg-blue-600 h-2 rounded-full transition-all"
                       style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}
                     ></div>
                   </div>
@@ -1021,9 +1254,7 @@ export default function AdminDashboard() {
                   className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
                   disabled={uploadProgress !== null}
                 >
-                  {uploadProgress 
-                    ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...` 
-                    : `Upload ${mediaForm.files.length > 0 ? `(${mediaForm.files.length} files)` : ''}`}
+                  {uploadProgress ? 'Uploading...' : 'Upload'}
                 </button>
               </div>
             </form>
