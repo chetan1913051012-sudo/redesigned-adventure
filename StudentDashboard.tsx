@@ -156,27 +156,41 @@ export default function StudentDashboard() {
       throw new Error('Cloudinary not configured. Please ask admin to configure it in Settings.')
     }
 
-    console.log('Uploading to Cloudinary with config:', config.cloudName)
+    console.log('=== Student Upload to Cloudinary ===')
+    console.log('File:', file.name, file.type, (file.size / 1024 / 1024).toFixed(2) + 'MB')
+    console.log('Cloud Name:', config.cloudName)
+    console.log('Upload Preset:', config.uploadPreset)
 
     const formData = new FormData()
     formData.append('file', file)
     formData.append('upload_preset', config.uploadPreset)
 
     const resourceType = file.type.startsWith('video/') ? 'video' : 'image'
+    console.log('Resource Type:', resourceType)
 
-    const response = await fetch(
-      `https://api.cloudinary.com/v1_1/${config.cloudName}/${resourceType}/upload`,
-      { method: 'POST', body: formData }
-    )
+    try {
+      const response = await fetch(
+        `https://api.cloudinary.com/v1_1/${config.cloudName}/${resourceType}/upload`,
+        { method: 'POST', body: formData }
+      )
 
-    if (!response.ok) {
-      const errorData = await response.json()
-      console.error('Cloudinary error:', errorData)
-      throw new Error(errorData.error?.message || 'Upload failed')
+      const responseData = await response.json()
+      console.log('Cloudinary Response:', responseData)
+
+      if (!response.ok) {
+        console.error('Cloudinary error:', responseData)
+        throw new Error(responseData.error?.message || `Upload failed (Status: ${response.status})`)
+      }
+
+      console.log('Upload successful! URL:', responseData.secure_url)
+      return responseData.secure_url
+    } catch (error: any) {
+      console.error('Upload error:', error)
+      if (error.message.includes('Failed to fetch')) {
+        throw new Error('Network error - Check your internet connection')
+      }
+      throw error
     }
-
-    const data = await response.json()
-    return data.secure_url
   }
 
   const handleUploadSubmit = async (e: React.FormEvent) => {
@@ -191,12 +205,12 @@ export default function StudentDashboard() {
 
     setUploading(true)
     let successCount = 0
-    let failCount = 0
+    let failedFiles: string[] = []
 
     try {
       for (let i = 0; i < uploadFiles.length; i++) {
         const file = uploadFiles[i]
-        setUploadProgress(`Uploading ${i + 1} of ${uploadFiles.length}...`)
+        setUploadProgress(`Uploading ${i + 1} of ${uploadFiles.length}... (${file.name})`)
 
         try {
           // Upload to Cloudinary
@@ -233,7 +247,10 @@ export default function StudentDashboard() {
               created_at: newMedia.createdAt
             })
 
-            if (error) throw error
+            if (error) {
+              console.error('Supabase error:', error)
+              throw new Error(`Database error: ${error.message}`)
+            }
           } else {
             // localStorage fallback
             const stored = localStorage.getItem('classX_media')
@@ -243,9 +260,9 @@ export default function StudentDashboard() {
           }
 
           successCount++
-        } catch (err) {
+        } catch (err: any) {
           console.error(`Failed to upload ${file.name}:`, err)
-          failCount++
+          failedFiles.push(`${file.name}: ${err.message || 'Unknown error'}`)
         }
       }
 
@@ -258,8 +275,8 @@ export default function StudentDashboard() {
         loadMedia()
       }
 
-      if (failCount > 0) {
-        alert(`⚠️ ${failCount} file(s) failed to upload.`)
+      if (failedFiles.length > 0) {
+        alert(`⚠️ ${failedFiles.length} file(s) failed to upload:\n\n${failedFiles.join('\n')}`)
       }
     } catch (error: any) {
       console.error('Upload error:', error)
