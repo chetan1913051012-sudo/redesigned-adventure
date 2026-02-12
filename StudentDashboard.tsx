@@ -73,17 +73,23 @@ export default function StudentDashboard() {
 
     try {
       if (isSupabaseConfigured() && supabase) {
-        // Fetch approved media assigned to this student OR to "all" students
-        // Also fetch pending/rejected media uploaded by this student
+        // Simpler approach: Fetch all media, then filter in code
         const { data, error } = await supabase
           .from('media')
           .select('*')
-          .or(`and(student_id.eq.${currentStudent.studentId},status.eq.approved),and(student_id.eq.all,status.eq.approved),uploaded_by.eq.${currentStudent.studentId}`)
           .order('created_at', { ascending: false })
 
         if (error) throw error
 
-        setMedia(data?.map(item => ({
+        // Filter in JavaScript instead of complex SQL query
+        const filteredData = (data || []).filter(item => {
+          const isApprovedForMe = (item.status === 'approved' || !item.status) && 
+            (item.student_id === currentStudent.studentId || item.student_id === 'all')
+          const isMyUpload = item.uploaded_by === currentStudent.studentId
+          return isApprovedForMe || isMyUpload
+        })
+
+        setMedia(filteredData.map(item => ({
           id: item.id,
           title: item.title,
           type: item.type,
@@ -93,7 +99,7 @@ export default function StudentDashboard() {
           status: item.status || 'approved',
           uploadedBy: item.uploaded_by || 'admin',
           createdAt: item.created_at
-        })) || [])
+        })))
       } else {
         // localStorage fallback
         const storedMedia = localStorage.getItem('classX_media')
@@ -109,35 +115,6 @@ export default function StudentDashboard() {
       }
     } catch (error) {
       console.error('Error loading media:', error)
-      // Try simpler query as fallback
-      if (isSupabaseConfigured() && supabase) {
-        try {
-          const { data } = await supabase
-            .from('media')
-            .select('*')
-            .order('created_at', { ascending: false })
-          
-          if (data) {
-            const filteredData = data.filter(item => 
-              (item.status === 'approved' && (item.student_id === currentStudent.studentId || item.student_id === 'all')) ||
-              (item.uploaded_by === currentStudent.studentId)
-            )
-            setMedia(filteredData.map(item => ({
-              id: item.id,
-              title: item.title,
-              type: item.type,
-              url: item.url,
-              description: item.description || '',
-              studentId: item.student_id,
-              status: item.status || 'approved',
-              uploadedBy: item.uploaded_by || 'admin',
-              createdAt: item.created_at
-            })))
-          }
-        } catch (e) {
-          console.error('Fallback query failed:', e)
-        }
-      }
     }
 
     setLoading(false)
