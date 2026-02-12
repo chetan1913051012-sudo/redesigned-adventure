@@ -85,7 +85,7 @@ export default function AdminDashboard() {
   const [mediaForm, setMediaForm] = useState({
     title: '',
     description: '',
-    studentId: '',
+    studentIds: [] as string[],
     files: [] as File[]
   })
   const [uploadProgress, setUploadProgress] = useState<{current: number, total: number} | null>(null)
@@ -344,8 +344,8 @@ export default function AdminDashboard() {
   const handleMediaSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (mediaForm.files.length === 0 || !mediaForm.studentId) {
-      alert('Please select at least one file and a student')
+    if (mediaForm.files.length === 0 || mediaForm.studentIds.length === 0) {
+      alert('Please select at least one file and at least one student')
       return
     }
 
@@ -363,9 +363,22 @@ export default function AdminDashboard() {
       return
     }
 
-    const isAllStudents = mediaForm.studentId === 'all'
-    const selectedStudent = isAllStudents ? null : students.find(s => s.studentId === mediaForm.studentId)
-    const studentName = isAllStudents ? 'All Students' : (selectedStudent?.name || '')
+    // Create student names string for display
+    const isAllStudents = mediaForm.studentIds.includes('all')
+    let studentIdsToSave: string
+    let studentNameToSave: string
+
+    if (isAllStudents) {
+      studentIdsToSave = 'all'
+      studentNameToSave = 'All Students'
+    } else {
+      studentIdsToSave = mediaForm.studentIds.join(',')
+      const selectedNames = mediaForm.studentIds.map(id => {
+        const student = students.find(s => s.studentId === id)
+        return student?.name || id
+      })
+      studentNameToSave = selectedNames.join(', ')
+    }
 
     setUploadProgress({ current: 0, total: mediaForm.files.length })
 
@@ -399,8 +412,8 @@ export default function AdminDashboard() {
             type: mediaType,
             url: fileUrl,
             description: mediaForm.description,
-            student_id: mediaForm.studentId,
-            student_name: studentName,
+            student_id: studentIdsToSave,
+            student_name: studentNameToSave,
             status: 'approved', // Admin uploads are auto-approved
             uploaded_by: 'admin'
           })
@@ -418,8 +431,8 @@ export default function AdminDashboard() {
             type: mediaType,
             url: fileUrl,
             description: mediaForm.description,
-            studentId: mediaForm.studentId,
-            studentName: studentName,
+            studentId: studentIdsToSave,
+            studentName: studentNameToSave,
             status: 'approved',
             uploadedBy: 'admin',
             createdAt: new Date().toISOString()
@@ -438,7 +451,7 @@ export default function AdminDashboard() {
       }
     }
 
-    setMediaForm({ title: '', description: '', studentId: '', files: [] })
+    setMediaForm({ title: '', description: '', studentIds: [], files: [] })
     setShowMediaForm(false)
     setUploadProgress(null)
     loadMedia()
@@ -1183,24 +1196,55 @@ export default function AdminDashboard() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Assign to *</label>
-                <select
-                  value={mediaForm.studentId}
-                  onChange={(e) => setMediaForm({ ...mediaForm, studentId: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                  required
-                  disabled={uploadProgress !== null}
-                >
-                  <option value="">Select recipient</option>
-                  <option value="all" className="font-bold text-green-600">🌐 All Students</option>
-                  <optgroup label="Individual Students">
-                    {students.map((s) => (
-                      <option key={s.id} value={s.studentId}>
-                        {s.name} ({s.studentId})
-                      </option>
-                    ))}
-                  </optgroup>
-                </select>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Assign to * (Select multiple students)</label>
+                <div className="border border-gray-300 rounded-lg p-3 max-h-48 overflow-y-auto">
+                  {/* All Students Option */}
+                  <label className="flex items-center gap-2 p-2 hover:bg-green-50 rounded cursor-pointer border-b border-gray-200 mb-2">
+                    <input
+                      type="checkbox"
+                      checked={mediaForm.studentIds.includes('all')}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setMediaForm({ ...mediaForm, studentIds: ['all'] })
+                        } else {
+                          setMediaForm({ ...mediaForm, studentIds: [] })
+                        }
+                      }}
+                      className="w-4 h-4 text-green-600"
+                      disabled={uploadProgress !== null}
+                    />
+                    <span className="font-bold text-green-600">🌐 All Students</span>
+                  </label>
+                  
+                  {/* Individual Students */}
+                  {!mediaForm.studentIds.includes('all') && students.map((s) => (
+                    <label key={s.id} className="flex items-center gap-2 p-2 hover:bg-blue-50 rounded cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={mediaForm.studentIds.includes(s.studentId)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setMediaForm({ ...mediaForm, studentIds: [...mediaForm.studentIds, s.studentId] })
+                          } else {
+                            setMediaForm({ ...mediaForm, studentIds: mediaForm.studentIds.filter(id => id !== s.studentId) })
+                          }
+                        }}
+                        className="w-4 h-4 text-blue-600"
+                        disabled={uploadProgress !== null}
+                      />
+                      <span>{s.name} ({s.studentId})</span>
+                    </label>
+                  ))}
+                  
+                  {mediaForm.studentIds.includes('all') && (
+                    <p className="text-sm text-gray-500 italic p-2">All students will see this media</p>
+                  )}
+                </div>
+                {mediaForm.studentIds.length > 0 && !mediaForm.studentIds.includes('all') && (
+                  <p className="text-sm text-blue-600 mt-1">
+                    ✅ {mediaForm.studentIds.length} student(s) selected
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Files * (Select Multiple)</label>
@@ -1240,7 +1284,7 @@ export default function AdminDashboard() {
                 <button
                   type="button"
                   onClick={() => {
-                    setMediaForm({ title: '', description: '', studentId: '', files: [] })
+                    setMediaForm({ title: '', description: '', studentIds: [], files: [] })
                     setShowMediaForm(false)
                   }}
                   className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"

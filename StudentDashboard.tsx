@@ -83,8 +83,12 @@ export default function StudentDashboard() {
 
         // Filter in JavaScript instead of complex SQL query
         const filteredData = (data || []).filter(item => {
-          const isApprovedForMe = (item.status === 'approved' || !item.status) && 
-            (item.student_id === currentStudent.studentId || item.student_id === 'all')
+          // Check if this media is assigned to this student
+          // student_id can be: "all", "STU001", or "STU001,STU002,STU003" (comma-separated)
+          const studentIds = (item.student_id || '').split(',').map((id: string) => id.trim())
+          const isAssignedToMe = studentIds.includes(currentStudent.studentId) || studentIds.includes('all')
+          
+          const isApprovedForMe = (item.status === 'approved' || !item.status) && isAssignedToMe
           const isMyUpload = item.uploaded_by === currentStudent.studentId
           return isApprovedForMe || isMyUpload
         })
@@ -107,10 +111,12 @@ export default function StudentDashboard() {
           const allMedia: Media[] = JSON.parse(storedMedia)
           // Show approved media assigned to this student OR to "all" students
           // Also show pending/rejected media uploaded by this student
-          setMedia(allMedia.filter(m => 
-            (m.status === 'approved' && (m.studentId === currentStudent.studentId || m.studentId === 'all')) ||
-            (m.uploadedBy === currentStudent.studentId)
-          ))
+          // studentId can be: "all", "STU001", or "STU001,STU002,STU003" (comma-separated)
+          setMedia(allMedia.filter(m => {
+            const studentIds = (m.studentId || '').split(',').map(id => id.trim())
+            const isAssignedToMe = studentIds.includes(currentStudent.studentId) || studentIds.includes('all')
+            return (m.status === 'approved' && isAssignedToMe) || (m.uploadedBy === currentStudent.studentId)
+          }))
         }
       }
     } catch (error) {
@@ -490,9 +496,13 @@ export default function StudentDashboard() {
                 </div>
                 <div className="p-3">
                   <h3 className="font-medium text-gray-800 truncate">{item.title}</h3>
-                  {item.studentId === 'all' && (
+                  {item.studentId === 'all' ? (
                     <span className="inline-block px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full mt-1">
                       🌐 Class Photo
+                    </span>
+                  ) : item.studentId?.includes(',') && (
+                    <span className="inline-block px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full mt-1">
+                      👥 Shared
                     </span>
                   )}
                   {item.description && (
