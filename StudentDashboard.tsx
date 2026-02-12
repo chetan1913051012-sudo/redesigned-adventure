@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
 import { supabase, isSupabaseConfigured } from './supabase-config'
-import { loadCloudinarySettings, getCloudinaryConfig } from './cloudinary-config'
+import { loadCloudinarySettings } from './cloudinary-config'
 import MediaModal from './MediaModal'
 
 interface Media {
@@ -149,23 +149,30 @@ export default function StudentDashboard() {
   }
 
   const uploadToCloudinary = async (file: File): Promise<string> => {
-    const config = await getCloudinaryConfig()
+    // Load config from Supabase (not localStorage)
+    const config = await loadCloudinarySettings()
     
-    if (!config.cloudName || !config.uploadPreset) {
-      throw new Error('Cloudinary not configured. Please ask admin to configure it.')
+    if (!config || !config.cloudName || !config.uploadPreset) {
+      throw new Error('Cloudinary not configured. Please ask admin to configure it in Settings.')
     }
+
+    console.log('Uploading to Cloudinary with config:', config.cloudName)
 
     const formData = new FormData()
     formData.append('file', file)
     formData.append('upload_preset', config.uploadPreset)
 
+    const resourceType = file.type.startsWith('video/') ? 'video' : 'image'
+
     const response = await fetch(
-      `https://api.cloudinary.com/v1_1/${config.cloudName}/auto/upload`,
+      `https://api.cloudinary.com/v1_1/${config.cloudName}/${resourceType}/upload`,
       { method: 'POST', body: formData }
     )
 
     if (!response.ok) {
-      throw new Error('Upload failed')
+      const errorData = await response.json()
+      console.error('Cloudinary error:', errorData)
+      throw new Error(errorData.error?.message || 'Upload failed')
     }
 
     const data = await response.json()
@@ -254,9 +261,9 @@ export default function StudentDashboard() {
       if (failCount > 0) {
         alert(`⚠️ ${failCount} file(s) failed to upload.`)
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Upload error:', error)
-      alert('Upload failed. Please try again.')
+      alert(`❌ Upload failed: ${error.message || 'Unknown error'}. Please try again or contact admin.`)
     }
 
     setUploading(false)
